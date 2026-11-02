@@ -213,6 +213,7 @@
       <span class="summary" id="summary"></span>
       <div class="footer-actions">
         <input type="text" class="name-input" id="nameInput" aria-label="输出文件名" title="输出文件名">
+        <button class="btn btn-secondary" id="printBtn">🖨 打印</button>
         <button class="btn btn-primary" id="mergeBtn">合并并下载</button>
       </div>
     </div>
@@ -266,6 +267,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   const card = document.getElementById('card');
   const summaryEl = document.getElementById('summary');
   const mergeBtn = document.getElementById('mergeBtn');
+  const printBtn = document.getElementById('printBtn');
   const toast = document.getElementById('toast');
   const nameInput = document.getElementById('nameInput');
   const sortAsc = document.getElementById('sortAsc');
@@ -384,11 +386,13 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       : '';
     if (busy) { mergeBtn.disabled = true; return; }
     if (mode === 'split') {
-      // 拆分提取仅处理 PDF
+      // 拆分提取仅处理 PDF，打印按钮隐藏
+      printBtn.style.display = 'none';
       const pdfCount = items.filter(it => it.kind === 'pdf' && isValid(it)).length;
       mergeBtn.disabled = pdfCount === 0;
       mergeBtn.textContent = '提取并下载 ZIP';
     } else {
+      printBtn.style.display = '';
       mergeBtn.disabled = okCount === 0;
       mergeBtn.textContent = '合并并下载';
     }
@@ -450,6 +454,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       b.setAttribute('aria-selected', on ? 'true' : 'false');
     });
     window.__lastMerge = null;
+    window.__lastPrint = null;
     window.__lastSplit = null;
     render(); // 重新渲染列表，保留输入框焦点
   }
@@ -520,6 +525,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
           updateMeta(it, div);
           refreshSummary();
           window.__lastMerge = null;
+    window.__lastPrint = null;
           window.__lastSplit = null;
         });
       }
@@ -531,6 +537,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     restoreFocus(focus);
     // 测试钩子：新列表使旧结果失效
     window.__lastMerge = null;
+    window.__lastPrint = null;
     window.__lastSplit = null;
   }
 
@@ -634,18 +641,15 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     });
   }
 
-  async function merge() {
-    if (busy) return;
+  // 构建合并 PDF（合并下载与批量打印共用管线）；无可用文件返回 null
+  async function buildMergedPdf() {
     const valid = items.filter(isValid);
-    if (!valid.length) { showToast('没有可合并的文件'); return; }
+    if (!valid.length) return null;
     const compressOn = compressEnabled.checked;
     const quality = Number(compressQuality.value);
     const maxEdge = Number(compressMaxEdge.value);
-    busy = true;
-    mergeBtn.disabled = true;
-    mergeBtn.textContent = '合并中…';
+    const out = await PDFLib.PDFDocument.create();
     try {
-      const out = await PDFLib.PDFDocument.create();
       let rawImageBytes = 0;
       let compressedImageBytes = 0;
       for (const it of valid) {
@@ -677,17 +681,70 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         }
       }
       const data = await out.save();
-      const blob = new Blob([data], { type: 'application/pdf' });
-      const name = `${outputBase()}.pdf`;
-      downloadBlob(blob, name);
-      const savedBytes = compressOn ? Math.max(0, rawImageBytes - compressedImageBytes) : 0;
-      window.__lastMerge = { name, size: blob.size, pages: out.getPageCount(), savedBytes }; // 测试钩子
-      const savedKB = Math.round(savedBytes / 1024);
-      showToast(`已合并 ${valid.length} 个文件，共 ${out.getPageCount()} 页` +
-        (compressOn && savedKB > 0 ? `；图片压缩完成，节省 ${savedKB} KB` : ''));
+      return {
+        blob: new Blob([data], { type: 'application/pdf' }),
+        pages: out.getPageCount(),
+        count: valid.length,
+        savedBytes: compressOn ? Math.max(0, rawImageBytes - compressedImageBytes) : 0,
+      };
     } catch (err) {
       console.error(err);
       showToast('合并失败：' + err.message);
+      return null;
+    }
+  }
+
+  async function merge() {
+    if (busy) return;
+    busy = true;
+    mergeBtn.disabled = true;
+    mergeBtn.textContent = '合并中…';
+    try {
+      const built = await buildMergedPdf();
+      if (!built) { showToast('没有可合并的文件'); return; }
+      const name = `${outputBase()}.pdf`;
+      downloadBlob(built.blob, name);
+      window.__lastMerge = { name, size: built.blob.size, pages: built.pages, savedBytes: built.savedBytes }; // 测试钩子
+      const savedKB = Math.round(built.savedBytes / 1024);
+      showToast(`已合并 ${built.count} 个文件，共 ${built.pages} 页` +
+        (built.savedBytes > 0 && savedKB > 0 ? `；图片压缩完成，节省 ${savedKB} KB` : ''));
+    } finally {
+      busy = false;
+      refreshSummary();
+    }
+  }
+
+  // 批量打印：临时合并 → 隐藏 iframe → 一次打印对话框整批出纸（Chromium 内置 PDF 查看器）
+  async function printMerged() {
+    if (busy) return;
+    busy = true;
+    printBtn.disabled = true;
+    try {
+      const built = await buildMergedPdf();
+      if (!built) { showToast('没有可打印的文件'); return; }
+      const url = URL.createObjectURL(built.blob);
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;right:0;bottom:0;width:1px;height:1px;opacity:0;border:0;';
+      frame.src = url;
+      frame.addEventListener('load', () => {
+        // 等待浏览器内置 PDF 查看器完成渲染再调起打印
+        setTimeout(() => {
+          try {
+            frame.contentWindow.focus();
+            frame.contentWindow.print();
+            window.__lastPrint = { pages: built.pages, size: built.blob.size }; // 测试钩子
+            showToast(`已发送 ${built.pages} 页到打印，请在打印对话框选择打印机`);
+          } catch (e) {
+            window.open(url, '_blank');
+            showToast('当前浏览器不支持内嵌打印，已在新标签页打开，请手动 Ctrl+P');
+          }
+          setTimeout(() => { frame.remove(); URL.revokeObjectURL(url); }, 60000);
+        }, 800);
+      });
+      document.body.appendChild(frame);
+    } catch (err) {
+      console.error(err);
+      showToast('打印失败：' + err.message);
     } finally {
       busy = false;
       refreshSummary();
@@ -755,6 +812,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   document.getElementById('fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
   document.getElementById('folderInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
   mergeBtn.addEventListener('click', onSubmit);
+  printBtn.addEventListener('click', printMerged);
   // 模式切换
   modeSwitch.addEventListener('click', e => {
     const btn = e.target.closest('button[data-mode]');
@@ -765,14 +823,17 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   compressEnabled.addEventListener('change', () => {
     updateCompressUI();
     window.__lastMerge = null;
+    window.__lastPrint = null;
   });
   compressQuality.addEventListener('change', () => {
     updateCompressUI();
     window.__lastMerge = null;
+    window.__lastPrint = null;
   });
   compressMaxEdge.addEventListener('change', () => {
     updateCompressUI();
     window.__lastMerge = null;
+    window.__lastPrint = null;
   });
   // 排序
   function applySort(order) {
@@ -794,6 +855,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   // 初始化状态
   updateCompressUI();
   window.__lastMerge = null;
+    window.__lastPrint = null;
   window.__lastSplit = null;
   // PWA：仅在 http/https 下注册，file:// 双击打开静默跳过
   if ((location.protocol === 'http:' || location.protocol === 'https:') &&
