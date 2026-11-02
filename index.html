@@ -113,6 +113,7 @@
   .footer .summary { font-size: 13px; color: var(--muted); }
   .footer .btn { padding: 10px 28px; font-size: 15px; }
   .hint { text-align: center; color: var(--muted); font-size: 12px; margin-top: 16px; }
+  .hint.version { margin-top: 6px; font-size: 11px; opacity: .7; }
   .empty .footer { display: none; }
   /* 排序工具栏 */
   .toolbar { display: flex; align-items: center; gap: 6px; padding: 0 20px 10px; }
@@ -243,6 +244,7 @@
   </div>
 
   <p class="hint">提示：列表可拖拽排序，也可用 ↑ ↓ 按钮调整顺序；PDF 可点击 ⚙ 指定页码。拆分提取模式下仅处理 PDF，图片会被跳过</p>
+  <p class="hint version">v1.4 · 纯本地处理，文件不上传</p>
 </div>
 
 <input type="file" id="fileInput" accept="application/pdf,.pdf,image/png,.png,image/jpeg,.jpg,.jpeg" multiple hidden>
@@ -1013,13 +1015,20 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     window.__lastPrint = null;
   window.__lastSplit = null;
   // PWA：仅在 http/https 下注册，file:// 双击打开静默跳过
-  if ((location.protocol === 'http:' || location.protocol === 'https:') &&
-      'serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW 注册失败', err));
-    });
-  }
-})();
+    if ((location.protocol === 'http:' || location.protocol === 'https:') &&
+        'serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW 注册失败', err));
+        // 新版本 SW 接管时自动刷新一次，保证用户总能看到最新版
+        let refreshing = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          if (refreshing) return;
+          refreshing = true;
+          window.location.reload();
+        });
+      });
+    }
+  })();
 </script>
 </body>
 </html>
