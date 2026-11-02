@@ -60,6 +60,29 @@
   .btn-primary:hover { background: var(--accent-hover); }
   .btn-secondary { background: #eef1f4; color: var(--text); }
   .btn-secondary:hover { background: #e2e6ea; }
+  /* 打印预览弹窗 */
+  .pv-mask { display:none; position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:50; align-items:center; justify-content:center; padding:24px; }
+  .pv-modal { background:var(--card); border-radius:12px; width:100%; max-width:960px; height:min(86vh,720px); display:flex; flex-direction:column; overflow:hidden; }
+  .pv-head { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; font-size:14px; }
+  .pv-cols { flex:1; display:flex; min-height:0; }
+  .pv-list { width:280px; border-right:1px solid var(--border); overflow:auto; padding:8px; }
+  .pv-item { display:flex; align-items:center; gap:6px; padding:7px 8px; border-radius:8px; cursor:pointer; font-size:12px; }
+  .pv-item:hover { background:#f1f5f9; }
+  .pv-item.active { background:#eff6ff; color:var(--accent); }
+  .pv-idx { color:var(--muted); min-width:16px; }
+  .pv-name { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pv-meta { color:var(--muted); font-size:11px; white-space:nowrap; }
+  .pv-ops button { border:none; background:transparent; cursor:pointer; color:var(--muted); padding:2px 4px; border-radius:4px; }
+  .pv-ops button:hover { background:#e2e8f0; color:var(--text); }
+  .pv-right { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .pv-toolbar { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--border); }
+  .pv-info { font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pv-pane { flex:1; min-height:0; display:flex; justify-content:center; background:#f1f5f9; }
+  .pv-pane iframe { width:100%; height:100%; border:0; }
+  .pv-pane img { max-width:100%; max-height:100%; object-fit:contain; margin:auto; }
+  .pv-foot { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px 16px; border-top:1px solid var(--border); }
+  .pv-hint { font-size:12px; color:var(--muted); }
+  @media (max-width:640px){ .pv-cols{flex-direction:column} .pv-list{width:auto; max-height:30%;} }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   /* 文件列表 */
   .list { padding: 0 20px 8px; }
@@ -225,6 +248,30 @@
 <input type="file" id="fileInput" accept="application/pdf,.pdf,image/png,.png,image/jpeg,.jpg,.jpeg" multiple hidden>
 <input type="file" id="folderInput" webkitdirectory hidden>
 <div class="toast" id="toast"></div>
+
+<!-- 打印预览弹窗 -->
+<div class="pv-mask" id="pvMask">
+  <div class="pv-modal">
+    <div class="pv-head">
+      <span>打印预览 · <span id="pvSummary"></span></span>
+      <button class="icon-btn" id="pvCancel" title="关闭">✕</button>
+    </div>
+    <div class="pv-cols">
+      <div class="pv-list" id="pvList"></div>
+      <div class="pv-right">
+        <div class="pv-toolbar">
+          <button class="btn btn-secondary" id="pvMergedBtn">查看合并后效果</button>
+          <span class="pv-info" id="pvInfo"></span>
+        </div>
+        <div class="pv-pane" id="pvPane"></div>
+      </div>
+    </div>
+    <div class="pv-foot">
+      <span class="pv-hint">↑ ↓ 调整打印顺序，左侧点选文件查看内容；顺序即打印顺序</span>
+      <button class="btn btn-primary" id="pvPrintBtn">开始打印</button>
+    </div>
+  </div>
+</div>
 
 <script>
 !function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"function"==typeof define&&define.amd?define(["exports"],e):e((t=t||self).PDFLib={})}(this,(function(t){"use strict";
@@ -812,7 +859,115 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   document.getElementById('fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
   document.getElementById('folderInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
   mergeBtn.addEventListener('click', onSubmit);
-  printBtn.addEventListener('click', printMerged);
+  printBtn.addEventListener('click', openPrintPreview);
+
+  // ===== 打印预览：逐文件查看内容 + 调整顺序，确认后再调起打印 =====
+  const pvMask = document.getElementById('pvMask');
+  const pvList = document.getElementById('pvList');
+  const pvPane = document.getElementById('pvPane');
+  const pvInfo = document.getElementById('pvInfo');
+  let pvUrls = [];       // 预览用 blob URL，关闭时统一释放
+  let pvMergedUrl = null;
+
+  function openPrintPreview() {
+    const valid = items.filter(isValid);
+    if (!valid.length) { showToast('没有可打印的文件'); return; }
+    const totalPages = valid.reduce((s, it) =>
+      s + (it.kind === 'image' ? 1 : getPdfRange(it).indices.length), 0);
+    document.getElementById('pvSummary').textContent = `${valid.length} 个文件 · 共 ${totalPages} 页`;
+    pvMask.style.display = 'flex';
+    pvShow(valid[0]);
+  }
+
+  function pvClose() {
+    pvMask.style.display = 'none';
+    pvUrls.forEach(u => URL.revokeObjectURL(u));
+    if (pvMergedUrl) { URL.revokeObjectURL(pvMergedUrl); pvMergedUrl = null; }
+    pvUrls = [];
+  }
+
+  function pvShow(it) {
+    const valid = items.filter(isValid);
+    if (!valid.length) { pvClose(); return; }
+    const idx = valid.indexOf(it);
+    // 左侧顺序列表
+    pvList.innerHTML = '';
+    valid.forEach((cur, i) => {
+      const row = document.createElement('div');
+      row.className = 'pv-item' + (cur === it ? ' active' : '');
+      const label = cur.kind === 'image'
+        ? `图片 ${cur.width}×${cur.height}`
+        : `${cur.pages} 页` + ((cur.range || '').trim() ? `（范围 ${cur.range.trim()}）` : '');
+      row.innerHTML = `
+        <span class="pv-idx">${i + 1}</span>
+        <span class="pv-name" title="${cur.file.name}">${cur.file.name}</span>
+        <span class="pv-meta">${label}</span>
+        <span class="pv-ops">
+          <button data-act="up" title="上移">↑</button>
+          <button data-act="down" title="下移">↓</button>
+        </span>`;
+      row.addEventListener('click', e => {
+        if (e.target.closest('button')) return;
+        pvShow(cur);
+      });
+      row.querySelector('[data-act=up]').addEventListener('click', e => {
+        e.stopPropagation();
+        const gi = items.indexOf(cur);
+        if (gi > 0) {
+          [items[gi - 1], items[gi]] = [items[gi], items[gi - 1]];
+          render();
+          pvShow(cur);
+        }
+      });
+      row.querySelector('[data-act=down]').addEventListener('click', e => {
+        e.stopPropagation();
+        const gi = items.indexOf(cur);
+        if (gi < items.length - 1) {
+          [items[gi + 1], items[gi]] = [items[gi], items[gi + 1]];
+          render();
+          pvShow(cur);
+        }
+      });
+      pvList.appendChild(row);
+    });
+    // 右侧内容预览（PDF 用浏览器内置查看器，图片直接显示）
+    pvPane.innerHTML = '';
+    pvInfo.textContent = `${idx + 1}/${valid.length} · ${it.file.name}`;
+    const blob = new Blob([it.bytes], { type: it.kind === 'image' ? it.mime : 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    pvUrls.push(url);
+    if (it.kind === 'image') {
+      const img = document.createElement('img');
+      img.src = url;
+      pvPane.appendChild(img);
+    } else {
+      const f = document.createElement('iframe');
+      f.src = url;
+      pvPane.appendChild(f);
+    }
+  }
+
+  async function pvShowMerged() {
+    pvInfo.textContent = '正在生成合并预览…';
+    try {
+      const built = await buildMergedPdf();
+      if (!built) { showToast('没有可打印的文件'); return; }
+      if (pvMergedUrl) URL.revokeObjectURL(pvMergedUrl);
+      pvMergedUrl = URL.createObjectURL(built.blob);
+      pvPane.innerHTML = '';
+      const f = document.createElement('iframe');
+      f.src = pvMergedUrl;
+      pvPane.appendChild(f);
+      pvInfo.textContent = `合并结果：共 ${built.pages} 页（此顺序即打印顺序）`;
+    } catch (e) {
+      showToast('预览失败：' + e.message);
+    }
+  }
+
+  document.getElementById('pvPrintBtn').addEventListener('click', () => { pvClose(); printMerged(); });
+  document.getElementById('pvCancel').addEventListener('click', pvClose);
+  document.getElementById('pvMergedBtn').addEventListener('click', pvShowMerged);
+  pvMask.addEventListener('click', e => { if (e.target === pvMask) pvClose(); });
   // 模式切换
   modeSwitch.addEventListener('click', e => {
     const btn = e.target.closest('button[data-mode]');
